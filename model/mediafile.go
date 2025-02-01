@@ -1,18 +1,19 @@
 package model
 
 import (
+	"cmp"
+	"encoding/json"
 	"mime"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/navidrome/navidrome/conf"
 	"github.com/navidrome/navidrome/consts"
-	"github.com/navidrome/navidrome/utils"
-	"github.com/navidrome/navidrome/utils/number"
 	"github.com/navidrome/navidrome/utils/slice"
-	"golang.org/x/exp/slices"
+	"github.com/navidrome/navidrome/utils/str"
 )
 
 type MediaFile struct {
@@ -20,6 +21,7 @@ type MediaFile struct {
 	Bookmarkable `structs:"-"`
 
 	ID                   string  `structs:"id" json:"id"`
+	LibraryID            int     `structs:"library_id" json:"libraryId"`
 	Path                 string  `structs:"path" json:"path"`
 	Title                string  `structs:"title" json:"title"`
 	Album                string  `structs:"album" json:"album"`
@@ -42,10 +44,11 @@ type MediaFile struct {
 	Suffix               string  `structs:"suffix" json:"suffix"`
 	Duration             float32 `structs:"duration" json:"duration"`
 	BitRate              int     `structs:"bit_rate" json:"bitRate"`
+	SampleRate           int     `structs:"sample_rate" json:"sampleRate"`
 	Channels             int     `structs:"channels" json:"channels"`
 	Genre                string  `structs:"genre" json:"genre"`
 	Genres               Genres  `structs:"-" json:"genres"`
-	FullText             string  `structs:"full_text" json:"fullText"`
+	FullText             string  `structs:"full_text" json:"-"`
 	SortTitle            string  `structs:"sort_title" json:"sortTitle,omitempty"`
 	SortAlbumName        string  `structs:"sort_album_name" json:"sortAlbumName,omitempty"`
 	SortArtistName       string  `structs:"sort_artist_name" json:"sortArtistName,omitempty"`
@@ -56,7 +59,7 @@ type MediaFile struct {
 	OrderAlbumArtistName string  `structs:"order_album_artist_name" json:"orderAlbumArtistName"`
 	Compilation          bool    `structs:"compilation" json:"compilation"`
 	Comment              string  `structs:"comment" json:"comment,omitempty"`
-	Lyrics               string  `structs:"lyrics" json:"lyrics,omitempty"`
+	Lyrics               string  `structs:"lyrics" json:"lyrics"`
 	Bpm                  int     `structs:"bpm" json:"bpm,omitempty"`
 	CatalogNum           string  `structs:"catalog_num" json:"catalogNum,omitempty"`
 	MbzRecordingID       string  `structs:"mbz_recording_id" json:"mbzRecordingID,omitempty"`
@@ -66,10 +69,10 @@ type MediaFile struct {
 	MbzAlbumArtistID     string  `structs:"mbz_album_artist_id" json:"mbzAlbumArtistId,omitempty"`
 	MbzAlbumType         string  `structs:"mbz_album_type" json:"mbzAlbumType,omitempty"`
 	MbzAlbumComment      string  `structs:"mbz_album_comment" json:"mbzAlbumComment,omitempty"`
-	RGAlbumGain          float64 `structs:"rg_album_gain" json:"rgAlbumGain"`
-	RGAlbumPeak          float64 `structs:"rg_album_peak" json:"rgAlbumPeak"`
-	RGTrackGain          float64 `structs:"rg_track_gain" json:"rgTrackGain"`
-	RGTrackPeak          float64 `structs:"rg_track_peak" json:"rgTrackPeak"`
+	RgAlbumGain          float64 `structs:"rg_album_gain" json:"rgAlbumGain"`
+	RgAlbumPeak          float64 `structs:"rg_album_peak" json:"rgAlbumPeak"`
+	RgTrackGain          float64 `structs:"rg_track_gain" json:"rgTrackGain"`
+	RgTrackPeak          float64 `structs:"rg_track_peak" json:"rgTrackPeak"`
 
 	CreatedAt time.Time `structs:"created_at" json:"createdAt"` // Time this entry was created in the DB
 	UpdatedAt time.Time `structs:"updated_at" json:"updatedAt"` // Time of file last update (mtime)
@@ -92,15 +95,22 @@ func (mf MediaFile) AlbumCoverArtID() ArtworkID {
 	return artworkIDFromAlbum(Album{ID: mf.AlbumID})
 }
 
+func (mf MediaFile) StructuredLyrics() (LyricList, error) {
+	lyrics := LyricList{}
+	err := json.Unmarshal([]byte(mf.Lyrics), &lyrics)
+	if err != nil {
+		return nil, err
+	}
+	return lyrics, nil
+}
+
 type MediaFiles []MediaFile
 
 // Dirs returns a deduped list of all directories from the MediaFiles' paths
 func (mfs MediaFiles) Dirs() []string {
-	var dirs []string
-	for _, mf := range mfs {
-		dir, _ := filepath.Split(mf.Path)
-		dirs = append(dirs, filepath.Clean(dir))
-	}
+	dirs := slice.Map(mfs, func(m MediaFile) string {
+		return filepath.Dir(m.Path)
+	})
 	slices.Sort(dirs)
 	return slices.Compact(dirs)
 }
@@ -109,16 +119,16 @@ func (mfs MediaFiles) Dirs() []string {
 // It assumes all mediafiles have the same Album, or else results are unpredictable.
 func (mfs MediaFiles) ToAlbum() Album {
 	a := Album{SongCount: len(mfs)}
-	var fullText []string
-	var albumArtistIds []string
-	var songArtistIds []string
-	var mbzAlbumIds []string
-	var comments []string
-	var years []int
-	var dates []string
-	var originalYears []int
-	var originalDates []string
-	var releaseDates []string
+	fullText := make([]string, 0, len(mfs))
+	albumArtistIds := make([]string, 0, len(mfs))
+	songArtistIds := make([]string, 0, len(mfs))
+	mbzAlbumIds := make([]string, 0, len(mfs))
+	comments := make([]string, 0, len(mfs))
+	years := make([]int, 0, len(mfs))
+	dates := make([]string, 0, len(mfs))
+	originalYears := make([]int, 0, len(mfs))
+	originalDates := make([]string, 0, len(mfs))
+	releaseDates := make([]string, 0, len(mfs))
 	for _, m := range mfs {
 		// We assume these attributes are all the same for all songs on an album
 		a.ID = m.AlbumID
@@ -128,7 +138,6 @@ func (mfs MediaFiles) ToAlbum() Album {
 		a.AlbumArtist = m.AlbumArtist
 		a.AlbumArtistID = m.AlbumArtistID
 		a.SortAlbumName = m.SortAlbumName
-		a.SortArtistName = m.SortArtistName
 		a.SortAlbumArtistName = m.SortAlbumArtistName
 		a.OrderAlbumName = m.OrderAlbumName
 		a.OrderAlbumArtistName = m.OrderAlbumArtistName
@@ -172,11 +181,10 @@ func (mfs MediaFiles) ToAlbum() Album {
 	a.MinYear, a.MaxYear = minMax(years)
 	a.MinOriginalYear, a.MaxOriginalYear = minMax(originalYears)
 	a.Comment, _ = allOrNothing(comments)
-	a.Comment, _ = allOrNothing(comments)
 	a.Genre = slice.MostFrequent(a.Genres).Name
-	slices.SortFunc(a.Genres, func(a, b Genre) bool { return a.ID < b.ID })
+	slices.SortFunc(a.Genres, func(a, b Genre) int { return cmp.Compare(a.ID, b.ID) })
 	a.Genres = slices.Compact(a.Genres)
-	a.FullText = " " + utils.SanitizeStrings(fullText...)
+	a.FullText = " " + str.SanitizeStrings(fullText...)
 	a = fixAlbumArtist(a, albumArtistIds)
 	songArtistIds = append(songArtistIds, a.AlbumArtistID, a.ArtistID)
 	slices.Sort(songArtistIds)
@@ -187,29 +195,25 @@ func (mfs MediaFiles) ToAlbum() Album {
 }
 
 func allOrNothing(items []string) (string, int) {
+	sort.Strings(items)
 	items = slices.Compact(items)
-	if len(items) == 1 {
-		return items[0], 1
-	}
-	if len(items) > 1 {
-		sort.Strings(items)
+	if len(items) != 1 {
 		return "", len(slices.Compact(items))
 	}
-	return "", 0
+	return items[0], 1
 }
 
 func minMax(items []int) (int, int) {
-	var max = items[0]
-	var min = items[0]
+	var mn, mx = items[0], items[0]
 	for _, value := range items {
-		max = number.Max(max, value)
-		if min == 0 {
-			min = value
+		mx = max(mx, value)
+		if mn == 0 {
+			mn = value
 		} else if value > 0 {
-			min = number.Min(min, value)
+			mn = min(mn, value)
 		}
 	}
-	return min, max
+	return mn, mx
 }
 
 func newer(t1, t2 time.Time) time.Time {
@@ -254,10 +258,10 @@ type MediaFileRepository interface {
 	GetAll(options ...QueryOptions) (MediaFiles, error)
 	Search(q string, offset int, size int) (MediaFiles, error)
 	Delete(id string) error
+	FindByPaths(paths []string) (MediaFiles, error)
 
 	// Queries by path to support the scanner, no Annotations or Bookmarks required in the response
 	FindAllByPath(path string) (MediaFiles, error)
-	FindByPath(path string) (*MediaFile, error)
 	FindPathsRecursively(basePath string) ([]string, error)
 	DeleteByPath(path string) (int64, error)
 

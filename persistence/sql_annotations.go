@@ -6,7 +6,8 @@ import (
 	"time"
 
 	. "github.com/Masterminds/squirrel"
-	"github.com/google/uuid"
+	"github.com/navidrome/navidrome/conf"
+	"github.com/navidrome/navidrome/consts"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 )
@@ -14,7 +15,7 @@ import (
 const annotationTable = "annotation"
 
 func (r sqlRepository) newSelectWithAnnotation(idField string, options ...model.QueryOptions) SelectBuilder {
-	return r.newSelect(options...).
+	query := r.newSelect(options...).
 		LeftJoin("annotation on ("+
 			"annotation.item_id = "+idField+
 			" AND annotation.item_type = '"+r.tableName+"'"+
@@ -22,10 +23,16 @@ func (r sqlRepository) newSelectWithAnnotation(idField string, options ...model.
 		Columns(
 			"coalesce(starred, 0) as starred",
 			"coalesce(rating, 0) as rating",
-			"coalesce(play_count, 0) as play_count",
 			"starred_at",
 			"play_date",
 		)
+	if conf.Server.AlbumPlayCountMode == consts.AlbumPlayCountModeNormalized && r.tableName == "album" {
+		query = query.Columns("round(coalesce(round(cast(play_count as float) / coalesce(song_count, 1), 1), 0)) as play_count")
+	} else {
+		query = query.Columns("coalesce(play_count, 0) as play_count")
+	}
+
+	return query
 }
 
 func (r sqlRepository) annId(itemID ...string) And {
@@ -44,7 +51,6 @@ func (r sqlRepository) annUpsert(values map[string]interface{}, itemIDs ...strin
 	c, err := r.executeSQL(upd)
 	if c == 0 || errors.Is(err, sql.ErrNoRows) {
 		for _, itemID := range itemIDs {
-			values["ann_id"] = uuid.NewString()
 			values["user_id"] = userId(r.ctx)
 			values["item_type"] = r.tableName
 			values["item_id"] = itemID
@@ -75,7 +81,6 @@ func (r sqlRepository) IncPlayCount(itemID string, ts time.Time) error {
 
 	if c == 0 || errors.Is(err, sql.ErrNoRows) {
 		values := map[string]interface{}{}
-		values["ann_id"] = uuid.NewString()
 		values["user_id"] = userId(r.ctx)
 		values["item_type"] = r.tableName
 		values["item_id"] = itemID

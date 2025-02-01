@@ -15,17 +15,15 @@ import (
 
 type radioRepository struct {
 	sqlRepository
-	sqlRestful
 }
 
 func NewRadioRepository(ctx context.Context, db dbx.Builder) model.RadioRepository {
 	r := &radioRepository{}
 	r.ctx = ctx
 	r.db = db
-	r.tableName = "radio"
-	r.filterMappings = map[string]filterFunc{
-		"name": containsFilter,
-	}
+	r.registerModel(&model.Radio{}, map[string]filterFunc{
+		"name": containsFilter("name"),
+	})
 	return r
 }
 
@@ -35,7 +33,7 @@ func (r *radioRepository) isPermitted() bool {
 }
 
 func (r *radioRepository) CountAll(options ...model.QueryOptions) (int64, error) {
-	sql := r.newSelect(options...)
+	sql := r.newSelect()
 	return r.count(sql, options...)
 }
 
@@ -93,7 +91,7 @@ func (r *radioRepository) Put(radio *model.Radio) error {
 }
 
 func (r *radioRepository) Count(options ...rest.QueryOptions) (int64, error) {
-	return r.CountAll(r.parseRestOptions(options...))
+	return r.CountAll(r.parseRestOptions(r.ctx, options...))
 }
 
 func (r *radioRepository) EntityName() string {
@@ -109,7 +107,7 @@ func (r *radioRepository) Read(id string) (interface{}, error) {
 }
 
 func (r *radioRepository) ReadAll(options ...rest.QueryOptions) (interface{}, error) {
-	return r.GetAll(r.parseRestOptions(options...))
+	return r.GetAll(r.parseRestOptions(r.ctx, options...))
 }
 
 func (r *radioRepository) Save(entity interface{}) (string, error) {

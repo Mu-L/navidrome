@@ -20,7 +20,7 @@ var _ = Describe("Responses", func() {
 	var response *Subsonic
 	BeforeEach(func() {
 		response = &Subsonic{
-			Status:        "ok",
+			Status:        StatusOK,
 			Version:       "1.8.0",
 			Type:          consts.AppName,
 			ServerVersion: "v0.0.0",
@@ -120,6 +120,73 @@ var _ = Describe("Responses", func() {
 		})
 	})
 
+	Describe("Artist", func() {
+		BeforeEach(func() {
+			response.Artist = &Artists{LastModified: 1, IgnoredArticles: "A"}
+		})
+
+		Context("without data", func() {
+			It("should match .XML", func() {
+				Expect(xml.MarshalIndent(response, "", "  ")).To(MatchSnapshot())
+			})
+			It("should match .JSON", func() {
+				Expect(json.MarshalIndent(response, "", "  ")).To(MatchSnapshot())
+			})
+		})
+
+		Context("with data", func() {
+			BeforeEach(func() {
+				artists := make([]ArtistID3, 1)
+				t := time.Date(2016, 03, 2, 20, 30, 0, 0, time.UTC)
+				artists[0] = ArtistID3{
+					Id:             "111",
+					Name:           "aaa",
+					Starred:        &t,
+					UserRating:     3,
+					AlbumCount:     2,
+					ArtistImageUrl: "https://lastfm.freetls.fastly.net/i/u/300x300/2a96cbd8b46e442fc41c2b86b821562f.png",
+				}
+				index := make([]IndexID3, 1)
+				index[0] = IndexID3{Name: "A", Artists: artists}
+				response.Artist.Index = index
+			})
+
+			It("should match .XML", func() {
+				Expect(xml.MarshalIndent(response, "", "  ")).To(MatchSnapshot())
+			})
+			It("should match .JSON", func() {
+				Expect(json.MarshalIndent(response, "", "  ")).To(MatchSnapshot())
+			})
+		})
+
+		Context("with data and MBID and Sort Name", func() {
+			BeforeEach(func() {
+				artists := make([]ArtistID3, 1)
+				t := time.Date(2016, 03, 2, 20, 30, 0, 0, time.UTC)
+				artists[0] = ArtistID3{
+					Id:             "111",
+					Name:           "aaa",
+					Starred:        &t,
+					UserRating:     3,
+					AlbumCount:     2,
+					ArtistImageUrl: "https://lastfm.freetls.fastly.net/i/u/300x300/2a96cbd8b46e442fc41c2b86b821562f.png",
+					MusicBrainzId:  "1234",
+					SortName:       "sort name",
+				}
+				index := make([]IndexID3, 1)
+				index[0] = IndexID3{Name: "A", Artists: artists}
+				response.Artist.Index = index
+			})
+
+			It("should match .XML", func() {
+				Expect(xml.MarshalIndent(response, "", "  ")).To(MatchSnapshot())
+			})
+			It("should match .JSON", func() {
+				Expect(json.MarshalIndent(response, "", "  ")).To(MatchSnapshot())
+			})
+		})
+	})
+
 	Describe("Child", func() {
 		Context("without data", func() {
 			BeforeEach(func() {
@@ -142,7 +209,8 @@ var _ = Describe("Responses", func() {
 					Year: 1985, Genre: "Rock", CoverArt: "1", Size: 8421341, ContentType: "audio/flac",
 					Suffix: "flac", TranscodedContentType: "audio/mpeg", TranscodedSuffix: "mp3",
 					Duration: 146, BitRate: 320, Starred: &t, Genres: []ItemGenre{{Name: "rock"}, {Name: "progressive"}},
-					Comment: "a comment", Bpm: 127, MediaType: MediaTypeSong, MusicBrainzId: "4321",
+					Comment: "a comment", Bpm: 127, MediaType: MediaTypeSong, MusicBrainzId: "4321", ChannelCount: 2,
+					SamplingRate: 44100, SortName: "sorted title",
 					ReplayGain: ReplayGain{TrackGain: 1, AlbumGain: 2, TrackPeak: 3, AlbumPeak: 4, BaseGain: 5, FallbackGain: 6},
 				}
 				response.Directory.Child = child
@@ -176,7 +244,9 @@ var _ = Describe("Responses", func() {
 					Id: "1", Name: "album", Artist: "artist", Genre: "rock",
 					Genres:        []ItemGenre{{Name: "rock"}, {Name: "progressive"}},
 					MusicBrainzId: "1234", IsCompilation: true, SortName: "sorted album",
-					DiscTitles: DiscTitles{{Disc: 1, Title: "disc 1"}, {Disc: 2, Title: "disc 2"}},
+					DiscTitles:          DiscTitles{{Disc: 1, Title: "disc 1"}, {Disc: 2, Title: "disc 2"}, {Disc: 3}},
+					OriginalReleaseDate: ItemDate{Year: 1994, Month: 2, Day: 4},
+					ReleaseDate:         ItemDate{Year: 2000, Month: 5, Day: 10},
 				}
 				t := time.Date(2016, 03, 2, 20, 30, 0, 0, time.UTC)
 				songs := []Child{{
@@ -463,7 +533,6 @@ var _ = Describe("Responses", func() {
 			It("should match .JSON", func() {
 				Expect(json.MarshalIndent(response, "", "  ")).To(MatchSnapshot())
 			})
-
 		})
 	})
 
@@ -602,9 +671,28 @@ var _ = Describe("Responses", func() {
 			})
 		})
 
+		Context("with only required fields", func() {
+			BeforeEach(func() {
+				t := time.Date(2016, 03, 2, 20, 30, 0, 0, time.UTC)
+				response.Shares.Share = []Share{{
+					ID:         "ABC123",
+					Url:        "http://localhost/s/ABC123",
+					Username:   "johndoe",
+					Created:    t,
+					VisitCount: 1,
+				}}
+			})
+			It("should match .XML", func() {
+				Expect(xml.MarshalIndent(response, "", "  ")).To(MatchSnapshot())
+			})
+			It("should match .JSON", func() {
+				Expect(json.MarshalIndent(response, "", "  ")).To(MatchSnapshot())
+			})
+		})
+
 		Context("with data", func() {
 			BeforeEach(func() {
-				t := time.Time{}
+				t := time.Date(2016, 03, 2, 20, 30, 0, 0, time.UTC)
 				share := Share{
 					ID:          "ABC123",
 					Url:         "http://localhost/p/ABC123",
@@ -612,7 +700,7 @@ var _ = Describe("Responses", func() {
 					Username:    "deluan",
 					Created:     t,
 					Expires:     &t,
-					LastVisited: t,
+					LastVisited: &t,
 					VisitCount:  2,
 				}
 				share.Entry = make([]Child, 2)
@@ -795,4 +883,69 @@ var _ = Describe("Responses", func() {
 			})
 		})
 	})
+
+	Describe("LyricsList", func() {
+		BeforeEach(func() {
+			response.LyricsList = &LyricsList{}
+		})
+
+		Describe("without data", func() {
+			It("should match .XML", func() {
+				Expect(xml.MarshalIndent(response, "", "  ")).To(MatchSnapshot())
+			})
+			It("should match .JSON", func() {
+				Expect(json.MarshalIndent(response, "", "  ")).To(MatchSnapshot())
+			})
+		})
+
+		Describe("with data", func() {
+			BeforeEach(func() {
+				times := []int64{18800, 22801}
+				offset := int64(100)
+
+				response.LyricsList.StructuredLyrics = StructuredLyrics{
+					{
+						Lang:          "eng",
+						DisplayArtist: "Rick Astley",
+						DisplayTitle:  "Never Gonna Give You Up",
+						Offset:        &offset,
+						Synced:        true,
+						Line: []Line{
+							{
+								Start: &times[0],
+								Value: "We're no strangers to love",
+							},
+							{
+								Start: &times[1],
+								Value: "You know the rules and so do I",
+							},
+						},
+					},
+					{
+						Lang:          "xxx",
+						DisplayArtist: "Rick Astley",
+						DisplayTitle:  "Never Gonna Give You Up",
+						Offset:        &offset,
+						Synced:        false,
+						Line: []Line{
+							{
+								Value: "We're no strangers to love",
+							},
+							{
+								Value: "You know the rules and so do I",
+							},
+						},
+					},
+				}
+			})
+
+			It("should match .XML", func() {
+				Expect(xml.MarshalIndent(response, "", "  ")).To(MatchSnapshot())
+			})
+			It("should match .JSON", func() {
+				Expect(json.MarshalIndent(response, "", "  ")).To(MatchSnapshot())
+			})
+		})
+	})
+
 })

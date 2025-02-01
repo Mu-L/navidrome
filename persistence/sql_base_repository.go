@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"reflect"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,13 +16,31 @@ import (
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/model/request"
+	"github.com/navidrome/navidrome/utils/hasher"
 	"github.com/pocketbase/dbx"
 )
 
+// sqlRepository is the base repository for all SQL repositories. It provides common functions to interact with the DB.
+// When creating a new repository using this base, you must:
+//
+//   - Embed this struct.
+//   - Set ctx and db fields. ctx should be the context passed to the constructor method, usually obtained from the request
+//   - Call registerModel with the model instance and any possible filters.
+//   - If the model has a different table name than the default (lowercase of the model name), it should be set manually
+//     using the tableName field.
+//   - Sort mappings must be set with setSortMappings method. If a sort field is not in the map, it will be used as the name of the column.
+//
+// All fields in filters and sortMappings must be in snake_case. Only sorts and filters based on real field names or
+// defined in the mappings will be allowed.
 type sqlRepository struct {
-	ctx          context.Context
-	tableName    string
-	db           dbx.Builder
+	ctx       context.Context
+	tableName string
+	db        dbx.Builder
+
+	// Do not set these fields manually, they are set by the registerModel method
+	filterMappings     map[string]filterFunc
+	isFieldWhiteListed fieldWhiteListedFunc
+	// Do not set this field manually, it is set by the setSortMappings method
 	sortMappings map[string]string
 }
 
@@ -40,6 +60,36 @@ func loggedUser(ctx context.Context) *model.User {
 	} else {
 		return &user
 	}
+}
+
+func (r *sqlRepository) registerModel(instance any, filters map[string]filterFunc) {
+	if r.tableName == "" {
+		r.tableName = strings.TrimPrefix(reflect.TypeOf(instance).String(), "*model.")
+		r.tableName = toSnakeCase(r.tableName)
+	}
+	r.tableName = strings.ToLower(r.tableName)
+	r.isFieldWhiteListed = registerModelWhiteList(instance)
+	r.filterMappings = filters
+}
+
+// setSortMappings sets the mappings for the sort fields. If the sort field is not in the map, it will be used as is.
+//
+// If PreferSortTags is enabled, it will map the order fields to the corresponding sort expression,
+// which gives precedence to sort tags.
+// Ex: order_title => (coalesce(nullif(sort_title,”),order_title) collate nocase)
+// To avoid performance issues, indexes should be created for these sort expressions
+func (r *sqlRepository) setSortMappings(mappings map[string]string) {
+	if conf.Server.PreferSortTags {
+		for k, v := range mappings {
+			v = mapSortOrder(v)
+			mappings[k] = v
+		}
+	}
+	r.sortMappings = mappings
+}
+
+func (r sqlRepository) getTableName() string {
+	return r.tableName
 }
 
 func (r sqlRepository) newSelect(options ...model.QueryOptions) SelectBuilder {
@@ -64,12 +114,23 @@ func (r sqlRepository) applyOptions(sq SelectBuilder, options ...model.QueryOpti
 	return sq
 }
 
-func (r sqlRepository) buildSortOrder(sort, order string) string {
+// TODO Change all sortMappings to have a consistent case
+func (r sqlRepository) sortMapping(sort string) string {
 	if mapping, ok := r.sortMappings[sort]; ok {
-		sort = mapping
+		return mapping
 	}
-
+	if mapping, ok := r.sortMappings[toCamelCase(sort)]; ok {
+		return mapping
+	}
 	sort = toSnakeCase(sort)
+	if mapping, ok := r.sortMappings[sort]; ok {
+		return mapping
+	}
+	return sort
+}
+
+func (r sqlRepository) buildSortOrder(sort, order string) string {
+	sort = r.sortMapping(sort)
 	order = strings.ToLower(strings.TrimSpace(order))
 	var reverseOrder string
 	if order == "desc" {
@@ -79,11 +140,12 @@ func (r sqlRepository) buildSortOrder(sort, order string) string {
 		reverseOrder = "desc"
 	}
 
-	var newSort []string
 	parts := strings.FieldsFunc(sort, splitFunc(','))
+	newSort := make([]string, 0, len(parts))
 	for _, p := range parts {
 		f := strings.FieldsFunc(p, splitFunc(' '))
-		newField := []string{f[0]}
+		newField := make([]string, 1, len(f))
+		newField[0] = f[0]
 		if len(f) == 1 {
 			newField = append(newField, order)
 		} else {
@@ -122,6 +184,24 @@ func (r sqlRepository) applyFilters(sq SelectBuilder, options ...model.QueryOpti
 	return sq
 }
 
+func (r sqlRepository) seedKey() string {
+	return r.tableName + userId(r.ctx)
+}
+
+func (r sqlRepository) resetSeededRandom(options []model.QueryOptions) {
+	if len(options) == 0 || options[0].Sort != "random" {
+		return
+	}
+	options[0].Sort = fmt.Sprintf("SEEDEDRAND('%s', %s.id)", r.seedKey(), r.tableName)
+	if options[0].Seed != "" {
+		hasher.SetSeed(r.seedKey(), options[0].Seed)
+		return
+	}
+	if options[0].Offset == 0 {
+		hasher.Reseed(r.seedKey())
+	}
+}
+
 func (r sqlRepository) executeSQL(sq Sqlizer) (int64, error) {
 	query, args, err := r.toSQL(sq)
 	if err != nil {
@@ -129,7 +209,7 @@ func (r sqlRepository) executeSQL(sq Sqlizer) (int64, error) {
 	}
 	start := time.Now()
 	var c int64
-	res, err := r.db.NewQuery(query).Bind(args).Execute()
+	res, err := r.db.NewQuery(query).Bind(args).WithContext(r.ctx).Execute()
 	if res != nil {
 		c, _ = res.RowsAffected()
 	}
@@ -142,30 +222,32 @@ func (r sqlRepository) executeSQL(sq Sqlizer) (int64, error) {
 	return res.RowsAffected()
 }
 
+var placeholderRegex = regexp.MustCompile(`\?`)
+
 func (r sqlRepository) toSQL(sq Sqlizer) (string, dbx.Params, error) {
 	query, args, err := sq.ToSql()
 	if err != nil {
 		return "", nil, err
 	}
 	// Replace query placeholders with named params
-	params := dbx.Params{}
-	for i, arg := range args {
-		p := fmt.Sprintf("p%d", i)
-		query = strings.Replace(query, "?", "{:"+p+"}", 1)
-		params[p] = arg
-	}
-	return query, params, nil
+	params := make(dbx.Params, len(args))
+	counter := 0
+	result := placeholderRegex.ReplaceAllStringFunc(query, func(_ string) string {
+		p := fmt.Sprintf("p%d", counter)
+		params[p] = args[counter]
+		counter++
+		return "{:" + p + "}"
+	})
+	return result, params, nil
 }
 
-// Note: Due to a bug in the QueryRow method, this function does not map any embedded structs (ex: annotations)
-// In this case, use the queryAll method and get the first item of the returned list
 func (r sqlRepository) queryOne(sq Sqlizer, response interface{}) error {
 	query, args, err := r.toSQL(sq)
 	if err != nil {
 		return err
 	}
 	start := time.Now()
-	err = r.db.NewQuery(query).Bind(args).One(response)
+	err = r.db.NewQuery(query).Bind(args).WithContext(r.ctx).One(response)
 	if errors.Is(err, sql.ErrNoRows) {
 		r.logSQL(query, args, nil, 0, start)
 		return model.ErrNotFound
@@ -183,12 +265,12 @@ func (r sqlRepository) queryAll(sq SelectBuilder, response interface{}, options 
 		return err
 	}
 	start := time.Now()
-	err = r.db.NewQuery(query).Bind(args).All(response)
+	err = r.db.NewQuery(query).Bind(args).WithContext(r.ctx).All(response)
 	if errors.Is(err, sql.ErrNoRows) {
 		r.logSQL(query, args, nil, -1, start)
 		return model.ErrNotFound
 	}
-	r.logSQL(query, args, err, -1, start)
+	r.logSQL(query, args, err, int64(reflect.ValueOf(response).Elem().Len()), start)
 	return err
 }
 
@@ -199,12 +281,12 @@ func (r sqlRepository) queryAllSlice(sq SelectBuilder, response interface{}) err
 		return err
 	}
 	start := time.Now()
-	err = r.db.NewQuery(query).Bind(args).Column(response)
+	err = r.db.NewQuery(query).Bind(args).WithContext(r.ctx).Column(response)
 	if errors.Is(err, sql.ErrNoRows) {
 		r.logSQL(query, args, nil, -1, start)
 		return model.ErrNotFound
 	}
-	r.logSQL(query, args, err, -1, start)
+	r.logSQL(query, args, err, int64(reflect.ValueOf(response).Elem().Len()), start)
 	return err
 }
 
@@ -231,6 +313,7 @@ func (r sqlRepository) exists(existsQuery SelectBuilder) (bool, error) {
 func (r sqlRepository) count(countQuery SelectBuilder, options ...model.QueryOptions) (int64, error) {
 	countQuery = countQuery.
 		RemoveColumns().Columns("count(distinct " + r.tableName + ".id) as count").
+		RemoveOffset().RemoveLimit().
 		From(r.tableName)
 	countQuery = r.applyFilters(countQuery, options...)
 	var res struct{ Count int64 }
@@ -239,7 +322,10 @@ func (r sqlRepository) count(countQuery SelectBuilder, options ...model.QueryOpt
 }
 
 func (r sqlRepository) put(id string, m interface{}, colsToUpdate ...string) (newId string, err error) {
-	values, _ := toSQLArgs(m)
+	values, err := toSQLArgs(m)
+	if err != nil {
+		return "", fmt.Errorf("error preparing values to write to DB: %w", err)
+	}
 	// If there's an ID, try to update first
 	if id != "" {
 		updateValues := map[string]interface{}{}

@@ -12,7 +12,6 @@ import (
 
 type playlistTrackRepository struct {
 	sqlRepository
-	sqlRestful
 	playlistId   string
 	playlist     *model.Playlist
 	playlistRepo *playlistRepository
@@ -25,11 +24,18 @@ func (r *playlistRepository) Tracks(playlistId string, refreshSmartPlaylist bool
 	p.ctx = r.ctx
 	p.db = r.db
 	p.tableName = "playlist_tracks"
-	p.sortMappings = map[string]string{
-		"id": "playlist_tracks.id",
-	}
+	p.registerModel(&model.PlaylistTrack{}, nil)
+	p.setSortMappings(map[string]string{
+		"id":       "playlist_tracks.id",
+		"artist":   "order_artist_name",
+		"album":    "order_album_name, order_album_artist_name",
+		"title":    "order_title",
+		"duration": "duration", // To make sure the field will be whitelisted
+	})
+
 	pls, err := r.Get(playlistId)
 	if err != nil {
+		log.Warn(r.ctx, "Error getting playlist's tracks", "playlistId", playlistId, err)
 		return nil
 	}
 	if refreshSmartPlaylist {
@@ -40,7 +46,7 @@ func (r *playlistRepository) Tracks(playlistId string, refreshSmartPlaylist bool
 }
 
 func (r *playlistTrackRepository) Count(options ...rest.QueryOptions) (int64, error) {
-	return r.count(Select().Where(Eq{"playlist_id": r.playlistId}), r.parseRestOptions(options...))
+	return r.count(Select().Where(Eq{"playlist_id": r.playlistId}), r.parseRestOptions(r.ctx, options...))
 }
 
 func (r *playlistTrackRepository) Read(id string) (interface{}, error) {
@@ -50,9 +56,9 @@ func (r *playlistTrackRepository) Read(id string) (interface{}, error) {
 			" AND annotation.item_type = 'media_file'"+
 			" AND annotation.user_id = '"+userId(r.ctx)+"')").
 		Columns(
-			"coalesce(starred, 0)",
-			"coalesce(play_count, 0)",
-			"coalesce(rating, 0)",
+			"coalesce(starred, 0) as starred",
+			"coalesce(play_count, 0) as play_count",
+			"coalesce(rating, 0) as rating",
 			"starred_at",
 			"play_date",
 			"f.*",
@@ -65,13 +71,19 @@ func (r *playlistTrackRepository) Read(id string) (interface{}, error) {
 	return &trk, err
 }
 
+// This is a "hack" to allow loadAllGenres to work with playlist tracks. Will be removed once we have a new
+// one-to-many relationship solution
+func (r *playlistTrackRepository) getTableName() string {
+	return "media_file"
+}
+
 func (r *playlistTrackRepository) GetAll(options ...model.QueryOptions) (model.PlaylistTracks, error) {
 	tracks, err := r.playlistRepo.loadTracks(r.newSelect(options...), r.playlistId)
 	if err != nil {
 		return nil, err
 	}
 	mfs := tracks.MediaFiles()
-	err = r.loadMediaFileGenres(&mfs)
+	err = loadAllGenres(r, mfs)
 	if err != nil {
 		log.Error(r.ctx, "Error loading genres for playlist", "playlist", r.playlist.Name, "id", r.playlist.ID, err)
 		return nil, err
@@ -95,7 +107,7 @@ func (r *playlistTrackRepository) GetAlbumIDs(options ...model.QueryOptions) ([]
 }
 
 func (r *playlistTrackRepository) ReadAll(options ...rest.QueryOptions) (interface{}, error) {
-	return r.GetAll(r.parseRestOptions(options...))
+	return r.GetAll(r.parseRestOptions(r.ctx, options...))
 }
 
 func (r *playlistTrackRepository) EntityName() string {

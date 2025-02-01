@@ -5,7 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -26,7 +26,7 @@ type (
 	}
 )
 
-func walkDirTree(ctx context.Context, rootFolder string) (<-chan dirStats, chan error) {
+func walkDirTree(ctx context.Context, rootFolder string) (<-chan dirStats, <-chan error) {
 	results := make(chan dirStats)
 	errC := make(chan error)
 	go func() {
@@ -64,7 +64,6 @@ func walkFolder(ctx context.Context, rootPath string, currentFolder string, resu
 }
 
 func loadDir(ctx context.Context, dirPath string) ([]string, *dirStats, error) {
-	var children []string
 	stats := &dirStats{}
 
 	dirInfo, err := os.Stat(dirPath)
@@ -77,11 +76,13 @@ func loadDir(ctx context.Context, dirPath string) ([]string, *dirStats, error) {
 	dir, err := os.Open(dirPath)
 	if err != nil {
 		log.Error(ctx, "Error in Opening directory", "path", dirPath, err)
-		return children, stats, err
+		return nil, stats, err
 	}
 	defer dir.Close()
 
-	for _, entry := range fullReadDir(ctx, dir) {
+	entries := fullReadDir(ctx, dir)
+	children := make([]string, 0, len(entries))
+	for _, entry := range entries {
 		isDir, err := isDirOrSymlinkToDir(dirPath, entry)
 		// Skip invalid symlinks
 		if err != nil {
@@ -160,6 +161,11 @@ func isDirOrSymlinkToDir(baseDir string, dirEnt fs.DirEntry) (bool, error) {
 	return fileInfo.IsDir(), nil
 }
 
+var ignoredDirs = []string{
+	"$RECYCLE.BIN",
+	"#snapshot",
+}
+
 // isDirIgnored returns true if the directory represented by dirEnt contains an
 // `ignore` file (named after skipScanFile)
 func isDirIgnored(baseDir string, dirEnt fs.DirEntry) bool {
@@ -168,8 +174,7 @@ func isDirIgnored(baseDir string, dirEnt fs.DirEntry) bool {
 	if strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "..") {
 		return true
 	}
-
-	if runtime.GOOS == "windows" && strings.EqualFold(name, "$RECYCLE.BIN") {
+	if slices.IndexFunc(ignoredDirs, func(s string) bool { return strings.EqualFold(s, name) }) != -1 {
 		return true
 	}
 	_, err := os.Stat(filepath.Join(baseDir, name, consts.SkipScanFile))

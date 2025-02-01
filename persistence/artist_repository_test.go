@@ -4,9 +4,12 @@ import (
 	"context"
 
 	"github.com/fatih/structs"
+	"github.com/navidrome/navidrome/conf"
+	"github.com/navidrome/navidrome/conf/configtest"
 	"github.com/navidrome/navidrome/log"
 	"github.com/navidrome/navidrome/model"
 	"github.com/navidrome/navidrome/model/request"
+	"github.com/navidrome/navidrome/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gstruct"
@@ -18,7 +21,7 @@ var _ = Describe("ArtistRepository", func() {
 	BeforeEach(func() {
 		ctx := log.NewContext(context.TODO())
 		ctx = request.WithUser(ctx, model.User{ID: "userid"})
-		repo = NewArtistRepository(ctx, getDBXBuilder())
+		repo = NewArtistRepository(ctx, GetDBXBuilder())
 	})
 
 	Describe("Count", func() {
@@ -42,24 +45,147 @@ var _ = Describe("ArtistRepository", func() {
 		})
 	})
 
+	Describe("GetIndexKey", func() {
+		// Note: OrderArtistName should never be empty, so we don't need to test for that
+		r := artistRepository{indexGroups: utils.ParseIndexGroups(conf.Server.IndexGroups)}
+		When("PreferSortTags is false", func() {
+			BeforeEach(func() {
+				DeferCleanup(configtest.SetupConfig)
+				conf.Server.PreferSortTags = false
+			})
+			It("returns the OrderArtistName key is SortArtistName is empty", func() {
+				conf.Server.PreferSortTags = false
+				a := model.Artist{SortArtistName: "", OrderArtistName: "Bar", Name: "Qux"}
+				idx := GetIndexKey(&r, a)
+				Expect(idx).To(Equal("B"))
+			})
+			It("returns the OrderArtistName key even if SortArtistName is not empty", func() {
+				a := model.Artist{SortArtistName: "Foo", OrderArtistName: "Bar", Name: "Qux"}
+				idx := GetIndexKey(&r, a)
+				Expect(idx).To(Equal("B"))
+			})
+		})
+		When("PreferSortTags is true", func() {
+			BeforeEach(func() {
+				DeferCleanup(configtest.SetupConfig)
+				conf.Server.PreferSortTags = true
+			})
+			It("returns the SortArtistName key if it is not empty", func() {
+				a := model.Artist{SortArtistName: "Foo", OrderArtistName: "Bar", Name: "Qux"}
+				idx := GetIndexKey(&r, a)
+				Expect(idx).To(Equal("F"))
+			})
+			It("returns the OrderArtistName key if SortArtistName is empty", func() {
+				a := model.Artist{SortArtistName: "", OrderArtistName: "Bar", Name: "Qux"}
+				idx := GetIndexKey(&r, a)
+				Expect(idx).To(Equal("B"))
+			})
+		})
+	})
+
 	Describe("GetIndex", func() {
-		It("returns the index", func() {
-			idx, err := repo.GetIndex()
-			Expect(err).To(BeNil())
-			Expect(idx).To(Equal(model.ArtistIndexes{
-				{
-					ID: "B",
-					Artists: model.Artists{
-						artistBeatles,
+		When("PreferSortTags is true", func() {
+			BeforeEach(func() {
+				DeferCleanup(configtest.SetupConfig)
+				conf.Server.PreferSortTags = true
+			})
+			It("returns the index when SortArtistName is not empty", func() {
+				artistBeatles.SortArtistName = "Foo"
+				er := repo.Put(&artistBeatles)
+				Expect(er).To(BeNil())
+
+				idx, err := repo.GetIndex()
+				Expect(err).To(BeNil())
+				Expect(idx).To(Equal(model.ArtistIndexes{
+					{
+						ID: "F",
+						Artists: model.Artists{
+							artistBeatles,
+						},
 					},
-				},
-				{
-					ID: "K",
-					Artists: model.Artists{
-						artistKraftwerk,
+					{
+						ID: "K",
+						Artists: model.Artists{
+							artistKraftwerk,
+						},
 					},
-				},
-			}))
+				}))
+
+				artistBeatles.SortArtistName = ""
+				er = repo.Put(&artistBeatles)
+				Expect(er).To(BeNil())
+			})
+
+			It("returns the index when SortArtistName is empty", func() {
+				idx, err := repo.GetIndex()
+				Expect(err).To(BeNil())
+				Expect(idx).To(Equal(model.ArtistIndexes{
+					{
+						ID: "B",
+						Artists: model.Artists{
+							artistBeatles,
+						},
+					},
+					{
+						ID: "K",
+						Artists: model.Artists{
+							artistKraftwerk,
+						},
+					},
+				}))
+			})
+		})
+
+		When("PreferSortTags is false", func() {
+			BeforeEach(func() {
+				DeferCleanup(configtest.SetupConfig)
+				conf.Server.PreferSortTags = false
+			})
+			It("returns the index when SortArtistName is not empty", func() {
+				artistBeatles.SortArtistName = "Foo"
+				er := repo.Put(&artistBeatles)
+				Expect(er).To(BeNil())
+
+				idx, err := repo.GetIndex()
+				Expect(err).To(BeNil())
+				Expect(idx).To(Equal(model.ArtistIndexes{
+					{
+						ID: "B",
+						Artists: model.Artists{
+							artistBeatles,
+						},
+					},
+					{
+						ID: "K",
+						Artists: model.Artists{
+							artistKraftwerk,
+						},
+					},
+				}))
+
+				artistBeatles.SortArtistName = ""
+				er = repo.Put(&artistBeatles)
+				Expect(er).To(BeNil())
+			})
+
+			It("returns the index when SortArtistName is empty", func() {
+				idx, err := repo.GetIndex()
+				Expect(err).To(BeNil())
+				Expect(idx).To(Equal(model.ArtistIndexes{
+					{
+						ID: "B",
+						Artists: model.Artists{
+							artistBeatles,
+						},
+					},
+					{
+						ID: "K",
+						Artists: model.Artists{
+							artistKraftwerk,
+						},
+					},
+				}))
+			})
 		})
 	})
 

@@ -2,6 +2,7 @@ package subsonic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -13,12 +14,12 @@ import (
 	"github.com/navidrome/navidrome/model/request"
 	"github.com/navidrome/navidrome/server/public"
 	"github.com/navidrome/navidrome/server/subsonic/responses"
-	"github.com/navidrome/navidrome/utils"
+	"github.com/navidrome/navidrome/utils/number"
 )
 
 func newResponse() *responses.Subsonic {
 	return &responses.Subsonic{
-		Status:        "ok",
+		Status:        responses.StatusOK,
 		Version:       Version,
 		Type:          consts.AppName,
 		ServerVersion: consts.Version,
@@ -26,40 +27,23 @@ func newResponse() *responses.Subsonic {
 	}
 }
 
-func requiredParamString(r *http.Request, param string) (string, error) {
-	p := utils.ParamString(r, param)
-	if p == "" {
-		return "", newError(responses.ErrorMissingParameter, "required '%s' parameter is missing", param)
-	}
-	return p, nil
-}
-
-func requiredParamStrings(r *http.Request, param string) ([]string, error) {
-	ps := utils.ParamStrings(r, param)
-	if len(ps) == 0 {
-		return nil, newError(responses.ErrorMissingParameter, "required '%s' parameter is missing", param)
-	}
-	return ps, nil
-}
-
-func requiredParamInt(r *http.Request, param string) (int, error) {
-	p := utils.ParamString(r, param)
-	if p == "" {
-		return 0, newError(responses.ErrorMissingParameter, "required '%s' parameter is missing", param)
-	}
-	return utils.ParamInt(r, param, 0), nil
-}
-
 type subError struct {
-	code     int
+	code     int32
 	messages []interface{}
 }
 
-func newError(code int, message ...interface{}) error {
+func newError(code int32, message ...interface{}) error {
 	return subError{
 		code:     code,
 		messages: message,
 	}
+}
+
+// errSubsonic and Unwrap are used to allow `errors.Is(err, errSubsonic)` to work
+var errSubsonic = errors.New("subsonic API error")
+
+func (e subError) Unwrap() error {
+	return fmt.Errorf("%w: %d", errSubsonic, e.code)
 }
 
 func (e subError) Error() string {
@@ -78,14 +62,6 @@ func getUser(ctx context.Context) model.User {
 		return user
 	}
 	return model.User{}
-}
-
-func toArtists(r *http.Request, artists model.Artists) []responses.Artist {
-	as := make([]responses.Artist, len(artists))
-	for i, artist := range artists {
-		as[i] = toArtist(r, artist)
-	}
-	return as
 }
 
 func toArtist(r *http.Request, a model.Artist) responses.Artist {
@@ -132,6 +108,14 @@ func toGenres(genres model.Genres) *responses.Genres {
 	return &responses.Genres{Genre: response}
 }
 
+func toItemGenres(genres model.Genres) []responses.ItemGenre {
+	itemGenres := make([]responses.ItemGenre, len(genres))
+	for i, g := range genres {
+		itemGenres[i] = responses.ItemGenre{Name: g.Name}
+	}
+	return itemGenres
+}
+
 func getTranscoding(ctx context.Context) (format string, bitRate int) {
 	if trc, ok := request.TranscodingFrom(ctx); ok {
 		format = trc.TargetFormat
@@ -142,8 +126,6 @@ func getTranscoding(ctx context.Context) (format string, bitRate int) {
 	return
 }
 
-// This seems to be duplicated, but it is an initial step into merging `engine` and the `subsonic` packages,
-// In the future there won't be any conversion to/from `engine. Entry` anymore
 func childFromMediaFile(ctx context.Context, mf model.MediaFile) responses.Child {
 	child := responses.Child{}
 	child.Id = mf.ID
@@ -154,7 +136,7 @@ func childFromMediaFile(ctx context.Context, mf model.MediaFile) responses.Child
 	child.Year = int32(mf.Year)
 	child.Artist = mf.Artist
 	child.Genre = mf.Genre
-	child.Genres = buildItemGenres(mf.Genres)
+	child.Genres = toItemGenres(mf.Genres)
 	child.Track = int32(mf.TrackNumber)
 	child.Duration = int32(mf.Duration)
 	child.Size = mf.Size
@@ -194,32 +176,32 @@ func childFromMediaFile(ctx context.Context, mf model.MediaFile) responses.Child
 	child.MediaType = responses.MediaTypeSong
 	child.MusicBrainzId = mf.MbzRecordingID
 	child.ReplayGain = responses.ReplayGain{
-		TrackGain: mf.RGTrackGain,
-		AlbumGain: mf.RGAlbumGain,
-		TrackPeak: mf.RGTrackPeak,
-		AlbumPeak: mf.RGAlbumPeak,
+		TrackGain: mf.RgTrackGain,
+		AlbumGain: mf.RgAlbumGain,
+		TrackPeak: mf.RgTrackPeak,
+		AlbumPeak: mf.RgAlbumPeak,
 	}
+	child.ChannelCount = int32(mf.Channels)
+	child.SamplingRate = int32(mf.SampleRate)
 	return child
 }
 
 func fakePath(mf model.MediaFile) string {
-	filename := mapSlashToDash(mf.Title)
+	builder := strings.Builder{}
+
+	builder.WriteString(fmt.Sprintf("%s/%s/", sanitizeSlashes(mf.AlbumArtist), sanitizeSlashes(mf.Album)))
+	if mf.DiscNumber != 0 {
+		builder.WriteString(fmt.Sprintf("%02d-", mf.DiscNumber))
+	}
 	if mf.TrackNumber != 0 {
-		filename = fmt.Sprintf("%02d - %s", mf.TrackNumber, filename)
+		builder.WriteString(fmt.Sprintf("%02d - ", mf.TrackNumber))
 	}
-	return fmt.Sprintf("%s/%s/%s.%s", mapSlashToDash(mf.AlbumArtist), mapSlashToDash(mf.Album), filename, mf.Suffix)
+	builder.WriteString(fmt.Sprintf("%s.%s", sanitizeSlashes(mf.Title), mf.Suffix))
+	return builder.String()
 }
 
-func mapSlashToDash(target string) string {
+func sanitizeSlashes(target string) string {
 	return strings.ReplaceAll(target, "/", "_")
-}
-
-func childrenFromMediaFiles(ctx context.Context, mfs model.MediaFiles) []responses.Child {
-	children := make([]responses.Child, len(mfs))
-	for i, mf := range mfs {
-		children[i] = childFromMediaFile(ctx, mf)
-	}
-	return children
 }
 
 func childFromAlbum(_ context.Context, al model.Album) responses.Child {
@@ -232,7 +214,7 @@ func childFromAlbum(_ context.Context, al model.Album) responses.Child {
 	child.Artist = al.AlbumArtist
 	child.Year = int32(al.MaxYear)
 	child.Genre = al.Genre
-	child.Genres = buildItemGenres(al.Genres)
+	child.Genres = toItemGenres(al.Genres)
 	child.CoverArt = al.CoverArtID().String()
 	child.Created = &al.CreatedAt
 	child.Parent = al.AlbumArtistID
@@ -253,42 +235,36 @@ func childFromAlbum(_ context.Context, al model.Album) responses.Child {
 	return child
 }
 
-func childrenFromAlbums(ctx context.Context, als model.Albums) []responses.Child {
-	children := make([]responses.Child, len(als))
-	for i, al := range als {
-		children[i] = childFromAlbum(ctx, al)
+// toItemDate converts a string date in the formats 'YYYY-MM-DD', 'YYYY-MM' or 'YYYY' to an OS ItemDate
+func toItemDate(date string) responses.ItemDate {
+	itemDate := responses.ItemDate{}
+	if date == "" {
+		return itemDate
 	}
-	return children
+	parts := strings.Split(date, "-")
+	if len(parts) > 2 {
+		itemDate.Day = number.ParseInt[int32](parts[2])
+	}
+	if len(parts) > 1 {
+		itemDate.Month = number.ParseInt[int32](parts[1])
+	}
+	itemDate.Year = number.ParseInt[int32](parts[0])
+
+	return itemDate
 }
 
-func buildItemGenres(genres model.Genres) []responses.ItemGenre {
-	itemGenres := make([]responses.ItemGenre, len(genres))
-	for i, g := range genres {
-		itemGenres[i] = responses.ItemGenre{Name: g.Name}
-	}
-	return itemGenres
-}
-
-func buildDiscSubtitles(_ context.Context, a model.Album) responses.DiscTitles {
+func buildDiscSubtitles(a model.Album) responses.DiscTitles {
 	if len(a.Discs) == 0 {
 		return nil
 	}
 	discTitles := responses.DiscTitles{}
 	for num, title := range a.Discs {
-		discTitles = append(discTitles, responses.DiscTitle{Disc: num, Title: title})
+		discTitles = append(discTitles, responses.DiscTitle{Disc: int32(num), Title: title})
 	}
 	sort.Slice(discTitles, func(i, j int) bool {
 		return discTitles[i].Disc < discTitles[j].Disc
 	})
 	return discTitles
-}
-
-func buildAlbumsID3(ctx context.Context, albums model.Albums) []responses.AlbumID3 {
-	res := make([]responses.AlbumID3, len(albums))
-	for i, album := range albums {
-		res[i] = buildAlbumID3(ctx, album)
-	}
-	return res
 }
 
 func buildAlbumID3(ctx context.Context, album model.Album) responses.AlbumID3 {
@@ -306,8 +282,8 @@ func buildAlbumID3(ctx context.Context, album model.Album) responses.AlbumID3 {
 	}
 	dir.Year = int32(album.MaxYear)
 	dir.Genre = album.Genre
-	dir.Genres = buildItemGenres(album.Genres)
-	dir.DiscTitles = buildDiscSubtitles(ctx, album)
+	dir.Genres = toItemGenres(album.Genres)
+	dir.DiscTitles = buildDiscSubtitles(album)
 	dir.UserRating = int32(album.Rating)
 	if !album.CreatedAt.IsZero() {
 		dir.Created = &album.CreatedAt
@@ -318,5 +294,49 @@ func buildAlbumID3(ctx context.Context, album model.Album) responses.AlbumID3 {
 	dir.MusicBrainzId = album.MbzAlbumID
 	dir.IsCompilation = album.Compilation
 	dir.SortName = album.SortAlbumName
+	dir.OriginalReleaseDate = toItemDate(album.OriginalDate)
+	dir.ReleaseDate = toItemDate(album.ReleaseDate)
 	return dir
+}
+
+func buildStructuredLyric(mf *model.MediaFile, lyrics model.Lyrics) responses.StructuredLyric {
+	lines := make([]responses.Line, len(lyrics.Line))
+
+	for i, line := range lyrics.Line {
+		lines[i] = responses.Line{
+			Start: line.Start,
+			Value: line.Value,
+		}
+	}
+
+	structured := responses.StructuredLyric{
+		DisplayArtist: lyrics.DisplayArtist,
+		DisplayTitle:  lyrics.DisplayTitle,
+		Lang:          lyrics.Lang,
+		Line:          lines,
+		Offset:        lyrics.Offset,
+		Synced:        lyrics.Synced,
+	}
+
+	if structured.DisplayArtist == "" {
+		structured.DisplayArtist = mf.Artist
+	}
+	if structured.DisplayTitle == "" {
+		structured.DisplayTitle = mf.Title
+	}
+
+	return structured
+}
+
+func buildLyricsList(mf *model.MediaFile, lyricsList model.LyricList) *responses.LyricsList {
+	lyricList := make(responses.StructuredLyrics, len(lyricsList))
+
+	for i, lyrics := range lyricsList {
+		lyricList[i] = buildStructuredLyric(mf, lyrics)
+	}
+
+	res := &responses.LyricsList{
+		StructuredLyrics: lyricList,
+	}
+	return res
 }

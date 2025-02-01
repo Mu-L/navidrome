@@ -1,10 +1,12 @@
 package model
 
 import (
+	"cmp"
+	"fmt"
 	"strings"
 	"time"
 
-	"github.com/navidrome/navidrome/utils/number"
+	"github.com/navidrome/navidrome/utils/random"
 )
 
 type Share struct {
@@ -13,8 +15,8 @@ type Share struct {
 	Username      string     `structs:"-" json:"username,omitempty"`
 	Description   string     `structs:"description" json:"description,omitempty"`
 	Downloadable  bool       `structs:"downloadable" json:"downloadable"`
-	ExpiresAt     time.Time  `structs:"expires_at" json:"expiresAt,omitempty"`
-	LastVisitedAt time.Time  `structs:"last_visited_at" json:"lastVisitedAt,omitempty"`
+	ExpiresAt     *time.Time `structs:"expires_at" json:"expiresAt,omitempty"`
+	LastVisitedAt *time.Time `structs:"last_visited_at" json:"lastVisitedAt,omitempty"`
 	ResourceIDs   string     `structs:"resource_ids" json:"resourceIds,omitempty"`
 	ResourceType  string     `structs:"resource_type" json:"resourceType,omitempty"`
 	Contents      string     `structs:"contents" json:"contents,omitempty"`
@@ -42,14 +44,28 @@ func (s Share) CoverArtID() ArtworkID {
 	case "artist":
 		return Artist{ID: ids[0]}.CoverArtID()
 	}
-	rnd := number.RandomInt64(int64(len(s.Tracks)))
+	rnd := random.Int64N(len(s.Tracks))
 	return s.Tracks[rnd].CoverArtID()
 }
 
 type Shares []Share
 
+// ToM3U8 exports the playlist to the Extended M3U8 format, as specified in
+// https://docs.fileformat.com/audio/m3u/#extended-m3u
+func (s Share) ToM3U8() string {
+	buf := strings.Builder{}
+	buf.WriteString("#EXTM3U\n")
+	buf.WriteString(fmt.Sprintf("#PLAYLIST:%s\n", cmp.Or(s.Description, s.ID)))
+	for _, t := range s.Tracks {
+		buf.WriteString(fmt.Sprintf("#EXTINF:%.f,%s - %s\n", t.Duration, t.Artist, t.Title))
+		buf.WriteString(t.Path + "\n")
+	}
+	return buf.String()
+}
+
 type ShareRepository interface {
 	Exists(id string) (bool, error)
 	Get(id string) (*Share, error)
 	GetAll(options ...QueryOptions) (Shares, error)
+	CountAll(options ...QueryOptions) (int64, error)
 }

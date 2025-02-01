@@ -51,6 +51,14 @@ func toSnakeCase(str string) string {
 	return strings.ToLower(snake)
 }
 
+var matchUnderscore = regexp.MustCompile("_([A-Za-z])")
+
+func toCamelCase(str string) string {
+	return matchUnderscore.ReplaceAllStringFunc(str, func(s string) string {
+		return strings.ToUpper(strings.Replace(s, "_", "", -1))
+	})
+}
+
 func exists(subTable string, cond squirrel.Sqlizer) existsCond {
 	return existsCond{subTable: subTable, cond: cond, not: false}
 }
@@ -72,4 +80,14 @@ func (e existsCond) ToSql() (string, []interface{}, error) {
 		sql = "not " + sql
 	}
 	return sql, args, err
+}
+
+var sortOrderRegex = regexp.MustCompile(`order_([a-z_]+)`)
+
+// Convert the order_* columns to an expression using sort_* columns. Example:
+// sort_album_name -> (coalesce(nullif(sort_album_name,”),order_album_name) collate nocase)
+// It finds order column names anywhere in the substring
+func mapSortOrder(order string) string {
+	order = strings.ToLower(order)
+	return sortOrderRegex.ReplaceAllString(order, "(coalesce(nullif(sort_$1,''),order_$1) collate nocase)")
 }
