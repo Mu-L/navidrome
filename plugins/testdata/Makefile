@@ -4,7 +4,7 @@ PLUGINS := $(patsubst %/go.mod,%,$(wildcard */go.mod))
 
 # Prefer tinygo if available, it produces smaller wasm binaries and
 # makes the tests faster.
-TINYGO := $(shell command -v tinygo 2> /dev/null)
+#TINYGO := $(shell command -v tinygo 2> /dev/null)
 
 all: $(PLUGINS:%=%.ndp)
 
@@ -25,7 +25,7 @@ PDK_SOURCES := $(shell find ../pdk/go -name '*.go' 2>/dev/null)
 # Build the wasm binary
 %.wasm: %/*.go %/go.mod $(PDK_SOURCES)
 ifdef TINYGO
-	cd $* && tinygo build -target wasip1 -buildmode=c-shared -o ../$@ .
+	time (cd $* && time tinygo build -target wasip1 -buildmode=c-shared -o ../$@ .)
 else
-	cd $* && GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o ../$@ .
+	time (cd $* && GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o ../$@ .)
 endif
